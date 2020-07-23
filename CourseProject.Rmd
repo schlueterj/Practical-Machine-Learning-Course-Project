@@ -1,0 +1,206 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "J. Schlueter"
+date: "07/20/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Practical Machine Learning Course Project - Prediction Assignment Writeup
+
+## Overview
+
+This is the course project for the Practical Machine Learning Course on Coursera offered by Johns Hopkins University. The goal of this assignment is to predict the manner in which 6 participants performed barbell lifts (correctly and incorrectly in 5 different ways). We will build three different prediction models (including cross validation) and determine their out-of-sample-errors. In our case, the prediction model with the smallest error is random forest. This model will be used to predict 20 different test cases. 
+
+## Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, the goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: <http://groupware.les.inf.puc-rio.br/har> (see the section on the Weight Lifting Exercise Dataset). 
+
+## Data and Exploratory Analysis
+
+### Data set
+
+The training data for this project are available here:
+
+<https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv>
+
+The test data are available here:
+
+<https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv>
+
+The data for this project come from this source: <http://groupware.les.inf.puc-rio.br/har>.
+
+### Loading the Data
+
+We start by loading the R packages and files required for our analysis. Furthermore, we set the seed to make this analysis reproducible.
+
+```{r global_options, include=FALSE}
+# global chunk options to not to show warnings and messages
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+```
+
+```{r}
+library(knitr)
+library(data.table)
+library(caret)
+library(corrplot)
+library(rpart)
+library(rattle)
+library(randomForest)
+library(xgboost)
+set.seed(123)
+
+# Checking if data folder already exists.
+if(!file.exists("data")){
+    dir.create("data")
+}
+
+# Download datasets, checking if they already exist in wd
+filename1 <- "data/train_set.csv"
+filename2 <- "data/test_set.csv"
+
+fileUrl1 <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+fileUrl2 <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+if(!file.exists(filename1)){
+        download.file(fileUrl1, destfile = filename1)}
+if(!file.exists(filename2)){
+        download.file(fileUrl2, destfile = filename2)}
+
+list.files("./data")
+
+#Load datasets
+train <- read.csv(filename1)
+test <- read.csv(filename2)
+```
+The train data contains 19622 obs. of 160 variables, the test data contains 20 obs. of 160 variables. We can't use the test data set when building the model. The test data will be used to predict the 20 test cases with the final chosen prediction model. So we estimate the test set accuracy with the train data by splitting them into training and testing set with the *createDataPartition()* function.
+
+```{r}
+set.seed(123)
+inTrain  <- createDataPartition(y=train$classe, p=0.75, list=FALSE)
+training <- train[inTrain, ]
+testing  <- train[-inTrain, ]
+dim(training)
+dim(testing)
+```
+
+### Preparing the Data
+
+During the cleaning process, we continuously display the dimension of the filtered data sets.
+
+First of all, we remove the ID variables and variables that have missing values.
+
+```{r}
+#Remove ID variables only
+filtered_training <- training[,-(1:7)]
+filtered_testing <- testing[,-(1:7)]
+
+#Remove columns that have NA values in filtered_training
+nas <- colSums(is.na(filtered_training)) == 0
+filtered_training <- filtered_training[, nas == TRUE]
+filtered_testing <- filtered_testing[, nas == TRUE]
+
+dim(filtered_training)
+dim(filtered_testing)
+```
+
+Next, we remove the zero- and near zero-Variance predictors
+```{r}
+nsv <- nearZeroVar(filtered_training, saveMetrics=FALSE)
+filtered_training <- filtered_training[,-nsv]
+filtered_testing <- filtered_testing[,-nsv]
+dim(filtered_training)
+dim(filtered_testing)
+```
+Finally, we identify correlated predictors and remove them. The *cor()* function expects numeric values, so we remove the character column classe first.
+```{r}
+highlyCortraining <- findCorrelation(cor(filtered_training[,colnames(filtered_training)!= "classe"]), cutoff = .75)
+final_training <- filtered_training[,-highlyCortraining]
+final_testing <- filtered_testing[,-highlyCortraining]
+dim(final_training)
+dim(final_testing)
+```
+The number of variables has been reduced to 32. With these variables we want to build our model. Having removed the highly correlated variables, the final correlation matrix looks as follows:
+
+```{r}
+cor_mat <- cor(final_training[,colnames(final_training)!= "classe"])
+corrplot(cor_mat, order = "FPC", method = "color", type = "upper", 
+         tl.cex = 0.8, tl.col = rgb(0, 0, 0))
+
+```
+
+## Model training
+
+In this assignment, we want to test three different classification type models:
+
+* CART
+* Random Forest
+* eXtreme Gradient Boosting
+
+### CART - Classification trees
+
+We first train the model and visualize it with the *fancyRpartPlot()* function.
+```{r}
+set.seed(123)
+ModFit1 <- train(classe~., method="rpart", data = final_training)
+fancyRpartPlot(ModFit1$finalModel)
+```
+
+Predicting on the final_testing data set yields
+
+```{r}
+pred1 <- predict(ModFit1,newdata=final_testing)
+cm1 <- confusionMatrix(pred1,as.factor(final_testing$classe))
+cm1
+```
+
+The accuracy of the classification tree model is 52.73%, hence the out-of-sample-error is 47.27%.
+
+### Random Forest
+Next, we want build a random forest prediction model. Using cross validation in the *trainControl* function, we define the model as follows:
+```{r}
+set.seed(123)
+train_control_rf <- trainControl(method="cv", number=3)
+ModFit2 <- train(classe~., data =final_training, method = "rf", trControl = train_control_rf)
+ModFit2$finalModel
+```
+
+Let's predict the new values with the random forest model:
+```{r}
+pred2 <- predict(ModFit2, newdata = final_testing)
+cm2 <- confusionMatrix(pred2,as.factor(final_testing$classe))
+cm2
+```
+
+For random forest, we obtained a very high accuracy of 99.31%, resulting in an out-of-sample-error of only .69%
+
+### Extreme Gradient Boosting
+Finally, we want to evaluate an xgb model.
+```{r}
+set.seed(123)
+train_control_xgb <- trainControl(method="cv", number=3)
+ModFit3 <- train(classe~., data =final_training, method = "xgbTree", trControl = train_control_xgb)
+ModFit3$finalModel
+```
+
+Now, we validate the xgb model on the testing data partition to determine its accuracy.
+```{r}
+pred3 <- predict(ModFit3, newdata = final_testing)
+cm3 <- confusionMatrix(pred3,as.factor(final_testing$classe))
+cm3
+```
+
+The xgb model's accuracy is 98.63%, hence the out-of-sample-error equals 1.27%.
+
+## Test Cases - Course Project Prediction Quiz
+
+Based on the accuracy value, we choose the random forest model to predict the 20 different test cases. The output will also be used for the quiz.
+
+```{r}
+final_results <- predict(ModFit2, newdata = test)
+final_results
+```
+
